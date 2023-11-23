@@ -6,7 +6,7 @@ import datasets
 from transformers import AutoTokenizer, Seq2SeqTrainer, Seq2SeqTrainingArguments, TrainingArguments, Trainer, \
     DataCollatorForLanguageModeling
 
-
+# TODO apply changes from the notebook
 class EncDec(nn.Module):
     def __init__(self, enc_model: str, dec_model: str) -> None:
         super().__init__()
@@ -51,13 +51,13 @@ cutoff_len = 512
 
 enc_tokenizer = AutoTokenizer.from_pretrained(enc_model)
 dec_tokenizer = AutoTokenizer.from_pretrained(dec_model)
-dec_tokenizer.pad_token = dec_tokenizer.eos_token
+dec_tokenizer.pad_token = -100
 
 def tokenize(prompt):
-    enc_input_ids = enc_tokenizer(prompt, truncation=True, max_length=cutoff_len)["input_ids"]
+    enc_input_ids = enc_tokenizer(prompt, padding=True, truncation=True, max_length=cutoff_len)["input_ids"]
     enc_input_ids = torch.tensor(enc_input_ids)
-    dec_input_ids = dec_tokenizer(prompt, truncation=True, max_length=cutoff_len)["input_ids"]
-    # dec_input_ids = [dec_tokenizer.pad_token] * (cutoff_len - len(dec_input_ids)) + dec_input_ids
+    dec_input_ids = dec_tokenizer(prompt, padding=True, truncation=True, max_length=cutoff_len)["input_ids"]
+    dec_input_ids = dec_tokenizer.pad(dec_input_ids, padding="max_length", max_length=cutoff_len)["input_ids"]
     labels = [1] * len(dec_input_ids)
     dec_input_ids = torch.tensor(dec_input_ids)
     return {
@@ -79,7 +79,7 @@ print(f"The column names are: {list(tokenized_datasets.features.keys())}")
 
 training_args = TrainingArguments(
     output_dir="./results",
-    per_device_train_batch_size=1,
+    per_device_train_batch_size=2,
     per_device_eval_batch_size=1,
     evaluation_strategy="steps",
     logging_strategy="steps",
