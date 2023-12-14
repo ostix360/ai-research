@@ -1,25 +1,52 @@
+# import fused_dense_lib
+import os
+from typing import Union, Optional, Callable
+
 from torch import nn
 import torch
 from torch.utils.data import DataLoader
-from transformers import AutoModel, AutoModelForCausalLM, GPT2LMHeadModel, AutoConfig
+from transformers import AutoModel, AutoModelForCausalLM, GPT2LMHeadModel, AutoConfig, PreTrainedModel, PretrainedConfig
 from transformers.models.bert import modeling_bert
+from transformers.models.gpt2 import modeling_gpt2
 from transformers.models.bert.modeling_bert import BertModel
 import datasets
-import bert_fa2
-from flash_attn.models.bert import BertModel
-from flash_attn.models.gpt import GPTModel
+# import bert_fa2
+# from flash_attn.models.bert import BertModel
+from flash_attn.models.gpt import GPTModel, GPTLMHeadModel
 from transformers import AutoTokenizer, Seq2SeqTrainer, Seq2SeqTrainingArguments, TrainingArguments, Trainer, \
     DataCollatorForLanguageModeling
+# from flash_attn.ops.fused_dense import ColumnParallelLinear
 
 import utils
 
+
 # modeling_bert.BertSelfAttention = bert_fa2.BertFlashAttention2Attention
+# import gpt_fa2
+# gpt_fa2.apply_patch()
 
-class EncDec(nn.Module):
-    def __init__(self, enc_model: str, dec_model: str) -> None:
-        super().__init__()
+class EncDecConfig(PretrainedConfig):
+    model_type = "enc_dec"
+    is_composition = True
 
-        self.encoder: BertModel = AutoModel.from_pretrained(enc_model,torch_dtype=torch.bfloat16)
+    def __init__(self, enc_model: str, dec_model: str, **kwargs):
+        super().__init__(**kwargs)
+        self.enc_model = enc_model
+        self.dec_model = dec_model
+
+    def save_pretrained(self, save_directory: Union[str, os.PathLike], push_to_hub: bool = False, **kwargs):
+        self.encoder.save_pretrained(save_directory, push_to_hub, **kwargs)
+        self.decoder.save_pretrained(save_directory, push_to_hub, **kwargs)
+
+
+class EncDec(PreTrainedModel):
+    def __init__(self, config, *inputs, **kwargs) -> None:
+        super().__init__(config, *inputs, **kwargs)
+        enc_model = config.enc_model
+        dec_model = config.dec_model
+        bert_config = AutoConfig.from_pretrained(enc_model, torch_dtype=torch.bfloat16)
+        bert_config.use_flash_attn = True
+
+        self.encoder = BertModel.from_pretrained(enc_model, config=bert_config, )
         self.decoder: GPT2LMHeadModel = AutoModelForCausalLM.from_pretrained(dec_model, add_cross_attention=True)
         self.adapter = nn.Linear(self.encoder.config.hidden_size, self.decoder.config.hidden_size)
 
@@ -46,21 +73,44 @@ class EncDec(nn.Module):
     def _get_name(self):
         return f"{self.decoder._get_name()}"
 
+    def save_pretrained(
+            self,
+            save_directory: Union[str, os.PathLike],
+            is_main_process: bool = True,
+            state_dict: Optional[dict] = None,
+            save_function: Callable = torch.save,
+            push_to_hub: bool = False,
+            max_shard_size: Union[int, str] = "5GB",
+            safe_serialization: bool = True,
+            variant: Optional[str] = None,
+            token: Optional[Union[str, bool]] = None,
+            save_peft_format: bool = True,
+            **kwargs,
+    ):
+        self.decoder.save_pretrained(dec_model+"/"+save_directory, is_main_process, state_dict, save_function, push_to_hub,
+                                     max_shard_size, safe_serialization, variant, token, save_peft_format, **kwargs)
+        self.encoder.save_pretrained(enc_model+"/"+save_directory, is_main_process, state_dict, save_function, push_to_hub,
+                                     max_shard_size, safe_serialization, variant, token, save_peft_format, **kwargs)
+
 
 enc_model = "bert-base-uncased"
 dec_model = "gpt2"
-model = EncDec(enc_model, dec_model)
+encdec_config = EncDecConfig(enc_model, dec_model)
+model = EncDec(encdec_config)
 
 t_dataset = datasets.load_dataset("wikipedia", "20220301.simple", split="train[:30000]")
 e_dataset = datasets.load_dataset("wikipedia", "20220301.simple", split="train[-50:]")
 
-
 cutoff_len = 512
+bert_config = AutoConfig.from_pretrained(dec_model, torch_dtype=torch.bfloat16)
+bert_config.use_flash_attn = True
 
+# model = GPTLMHeadModel.from_pretrained(dec_model, config=bert_config, strict=False)
 
 enc_tokenizer = AutoTokenizer.from_pretrained(enc_model)
 dec_tokenizer = AutoTokenizer.from_pretrained(dec_model)
 dec_tokenizer.pad_token = dec_tokenizer.eos_token
+
 
 def tokenize(prompt):
     enc_input_ids = enc_tokenizer(prompt, truncation=True, max_length=cutoff_len)["input_ids"]
@@ -77,6 +127,7 @@ def tokenize(prompt):
         "enc_attention_mask": enc_input_ids.ne(enc_tokenizer.pad_token_id),
         "enc_input_ids": enc_input_ids,
     }
+
 
 # def tokenize(prompt):
 #     input_ids = tokenizer(prompt, padding="max_length", truncation=True, max_length=cutoff_len)["input_ids"]
@@ -101,31 +152,36 @@ train_dataloader = DataLoader(
     tokenized_datasets, batch_size=1, shuffle=True, collate_fn=data_collator
 )
 
-
 # Debug
-batch = utils.debug_data_processing(train_dataloader)
-bert_config = AutoConfig.from_pretrained(dec_model, torch_dtype=torch.bfloat16)
-bert_config.use_flash_attn = True
-
-bert_model = GPTModel.from_pretrained(dec_model, config=bert_config, strict=False)
-bert_model = bert_model.to(device=torch.device("cuda"), dtype=torch.bfloat16)
-input_ids = batch["input_ids"].to(device=torch.device("cuda"))
-
-
-out = bert_model(input_ids, )
+# batch = utils.debug_data_processing(train_dataloader)
+# bert_config = AutoConfig.from_pretrained(dec_model, torch_dtype=torch.bfloat16, use_cache=False)
+# bert_config.use_flash_attn = True
+#
+# bert_model = AutoModelForCausalLM.from_pretrained(dec_model, config=bert_config)
+# bert_model = bert_model.to(device=torch.device("cuda"), dtype=torch.bfloat16)
+# input_ids = batch["input_ids"].to(device=torch.device("cuda"))
+#
+#
+# out = bert_model(input_ids, )
 
 training_args = TrainingArguments(
     output_dir="result",
-    per_device_train_batch_size=6,
+    per_device_train_batch_size=4,
     per_device_eval_batch_size=10,
     evaluation_strategy="steps",
     logging_strategy="steps",
     logging_steps=25,
     num_train_epochs=1,
     eval_steps=50,
-    # fp16=True,
     bf16=True,
+    bf16_full_eval=True,
+    # fp16_backend="apex",
+    # fp16=True,
+    # fp16_full_eval=True,
     # torch_compile=True,
+    # half_precision_backend="apex",
+    save_strategy="steps",
+    save_steps=3000,
     warmup_steps=2,
     learning_rate=2e-5,
     save_total_limit=1,
@@ -151,11 +207,10 @@ def freeze_params(model):
     #         p.requires_grad = True
 
 
-freeze_params(model.encoder)
+# freeze_params(model.encoder)
 # freeze_params(model.decoder)
 nb_trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
 print(f"Number of trainable parameters: {nb_trainable_params}")
 # print the model architecture (state_dict)
 
-# trainer.train()
-
+trainer.train()
