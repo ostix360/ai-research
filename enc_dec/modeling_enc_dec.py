@@ -3,21 +3,29 @@ from typing import Union, Optional, Callable
 
 import torch
 from torch import nn
-from transformers import AutoModelForCausalLM, GPT2LMHeadModel, AutoConfig, PreTrainedModel
+from transformers import AutoModelForCausalLM, GPT2LMHeadModel, AutoConfig, PreTrainedModel, AutoModel
 from transformers.models.bert.modeling_bert import BertModel
 
 
 class EncDec(PreTrainedModel):
     def __init__(self, config, *inputs, **kwargs) -> None:
         super().__init__(config, *inputs, **kwargs)
-        self.enc_model = config.enc_model
-        self.dec_model = config.dec_model
-        bert_config = AutoConfig.from_pretrained(self.enc_model, torch_dtype=torch.bfloat16)
-        bert_config.use_flash_attn = True
+        if config._name_or_path == "":
+            self.enc_model = config.enc_model
+            self.dec_model = config.dec_model
+            bert_config = AutoConfig.from_pretrained(self.enc_model, torch_dtype=torch.bfloat16)
+            bert_config.use_flash_attn = True
 
-        self.encoder = BertModel.from_pretrained(self.enc_model, config=bert_config, )
-        self.decoder: GPT2LMHeadModel = AutoModelForCausalLM.from_pretrained(self.dec_model, add_cross_attention=True)
-        self.adapter = nn.Linear(self.encoder.config.hidden_size, self.decoder.config.hidden_size)
+            self.encoder = BertModel.from_pretrained(self.enc_model, config=bert_config, )
+            self.decoder: GPT2LMHeadModel = AutoModelForCausalLM.from_pretrained(self.dec_model, add_cross_attention=True)
+            self.adapter = nn.Linear(self.encoder.config.hidden_size, self.decoder.config.hidden_size)
+        else:
+            # TODO, useless loading and warning
+            self.encoder = AutoModel.from_pretrained(config.enc_model)
+            self.decoder = AutoModelForCausalLM.from_pretrained(config.dec_model, add_cross_attention=True)
+            self.adapter = nn.Linear(self.encoder.config.hidden_size, self.decoder.config.hidden_size)
+        print("post_init")
+        self.post_init()
 
     def forward(self, input_ids, enc_attention_mask, attention_mask, labels=None, enc_input_ids=None):
         # Pass input through encoder
@@ -40,7 +48,8 @@ class EncDec(PreTrainedModel):
         return decoder_outputs
 
     def _get_name(self):
-        return f"{self.decoder._get_name()}"
+        return f"{self.encoder._get_name()}To{self.decoder._get_name()}"
+    
 
     def save_pretrained(
             self,
@@ -55,9 +64,7 @@ class EncDec(PreTrainedModel):
             token: Optional[Union[str, bool]] = None,
             save_peft_format: bool = True,
             **kwargs,
-    ):
-        self.decoder.save_pretrained(save_directory+"/"+self.dec_model, is_main_process, state_dict, save_function, push_to_hub,
-                                     max_shard_size, safe_serialization, variant, token, save_peft_format, **kwargs)
-        self.encoder.save_pretrained(save_directory+"/"+self.enc_model, is_main_process, state_dict, save_function, push_to_hub,
-                                     max_shard_size, safe_serialization, variant, token, save_peft_format, **kwargs)
+    ):    
+        self.encoder.config.save_pretrained(save_directory)
+        self.decoder.config.save_pretrained(save_directory)
         super().save_pretrained(save_directory, is_main_process, state_dict, save_function, push_to_hub, max_shard_size, safe_serialization, variant, token, save_peft_format, **kwargs)
