@@ -12,6 +12,10 @@ class EncDecConfig(PretrainedConfig):
         super().__init__(**kwargs)
         self.enc_model = enc_model
         self.dec_model = dec_model
+        self.auto_map = {
+            "AutoModelForCausalLM": "modeling_enc_dec.EncDec",
+            "AutoConfig": "configuration_enc_dec.EncDecConfig",
+        }
 
     def save_pretrained(self, save_directory: Union[str, os.PathLike], push_to_hub: bool = False, **kwargs):
         super().save_pretrained(save_directory, push_to_hub, **kwargs)
