@@ -1,34 +1,29 @@
-import os
-from typing import Union, Optional, Callable
-
 import datasets
 import torch
+import pandas as pd
 from datasets import Dataset
-from torch import nn
 from torch.utils.data import DataLoader
-from transformers import AutoModelForCausalLM, GPT2LMHeadModel, AutoConfig, PreTrainedModel, PretrainedConfig, \
-    BertTokenizer
 from transformers import AutoTokenizer, TrainingArguments, Trainer, \
-    DataCollatorForLanguageModeling
-from transformers.models.bert.modeling_bert import BertModel
+    DataCollatorForLanguageModeling, GPT2Tokenizer, Seq2SeqTrainer, Seq2SeqTrainingArguments
+from transformers import BertTokenizer
 
 import utils
-from enc_dec.configuration_enc_dec import EncDecConfig
-from enc_dec.modeling_enc_dec import EncDec
+from configuration_enc_dec import EncDecConfig
+from data_collator import DataCollatorForSeq2Seq
+from modeling_enc_dec import EncDec
 
 enc_model = "bert-base-uncased"
 dec_model = "gpt2"
 encdec_config = EncDecConfig(enc_model, dec_model)
 model = EncDec(encdec_config)
-model.save_pretrained("./result_code")
-t_dataset = datasets.load_dataset("ise-uiuc/Magicoder-OSS-Instruct-75K", split="train[:1000]")
-e_dataset = datasets.load_dataset("ise-uiuc/Magicoder-OSS-Instruct-75K", split="train[-10:]")
+t_dataset = datasets.load_dataset("ise-uiuc/Magicoder-OSS-Instruct-75K", split="train[:5000]")
+e_dataset = datasets.load_dataset("ise-uiuc/Magicoder-OSS-Instruct-75K", split="train[-100:]")
 
 cutoff_len = 1024
 
 
 enc_tokenizer: BertTokenizer = AutoTokenizer.from_pretrained(enc_model)
-dec_tokenizer = AutoTokenizer.from_pretrained(dec_model)
+dec_tokenizer: GPT2Tokenizer = AutoTokenizer.from_pretrained(dec_model)
 dec_tokenizer.pad_token = dec_tokenizer.eos_token
 
 
@@ -46,15 +41,14 @@ def tokenize(user, assistant):
         overflow_to_sample_mapping = dec_input_ids["overflow_to_sample_mapping"][i]
         enc_input_id = enc_input_ids[overflow_to_sample_mapping]
         enc_input_id = torch.tensor(enc_input_id)
-        labels = [1] * len(input_ids)
         input_ids = torch.tensor(input_ids)
-        if length == cutoff_len:
+        if length == cutoff_len:    # replace pad_token_id with -100 for labels
             input_batch.append({
-                "input_ids": input_ids,
-                "attention_mask": input_ids.ne(dec_tokenizer.pad_token_id),
-                "labels": labels,
-                "enc_attention_mask": enc_input_id.ne(enc_tokenizer.pad_token_id),
-                "enc_input_ids": enc_input_id,
+                "dec_input_ids": input_ids,
+                "dec_attention_mask": input_ids.ne(dec_tokenizer.pad_token_id),
+                "labels": input_ids,
+                "attention_mask": enc_input_id.ne(enc_tokenizer.pad_token_id),
+                "input_ids": enc_input_id,
             })
         i += 1
     return Dataset.from_list(input_batch)
@@ -71,44 +65,54 @@ def tokenize(user, assistant):
 #     }
 
 def tokenize_func(data):
-    return tokenize([f"###USER: {d}\n" for d in data["problem"]], [f"###ASSISTANT: {d}" for d in data["solution"]])
+    df = pd.DataFrame(data)
+    df['problem'] = '###USER: ' + df['problem']
+    df['solution'] = df['problem'] + '\n###ASSISTANT: ' + df['solution']
+    return tokenize(df['problem'].tolist(), df['solution'].tolist())
 
 
 tokenized_datasets = tokenize_func(t_dataset)
 e_tokenized_datasets = tokenize_func(e_dataset)
 
 print(f"The column names are: {list(tokenized_datasets.features.keys())}")
-data_collator = DataCollatorForLanguageModeling(dec_tokenizer, mlm=False)
+data_collator = DataCollatorForSeq2Seq(dec_tokenizer, model=model)
 train_dataloader = DataLoader(
     tokenized_datasets, batch_size=1, shuffle=True, collate_fn=data_collator
 )
+datas = data_collator([tokenized_datasets[i] for i in [0, 1,]])
 
 # Debug
 batch = utils.debug_data_processing(train_dataloader)
+print(batch)
 
-out = model(**batch)
+# model.to("cuda")
+# batch.to("cuda")
 
-training_args = TrainingArguments(
+# out = model(**batch)
+
+training_args = Seq2SeqTrainingArguments(
     output_dir="../result_code",
-    per_device_train_batch_size=2,
-    per_device_eval_batch_size=1,
+    per_device_train_batch_size=1,
+    per_device_eval_batch_size=2,
+    predict_with_generate=True,
     evaluation_strategy="steps",
     logging_strategy="steps",
-    logging_steps=25,
+    logging_steps=50,
     num_train_epochs=1,
-    eval_steps=500,
+    eval_steps=1000,
     bf16=True,
     bf16_full_eval=True,
     save_strategy="steps",
-    save_steps=500,
+    save_steps=10000,
     warmup_steps=2,
-    learning_rate=2e-5,
+    learning_rate=3e-5,
+    # optim="adafactor",
     save_total_limit=1,
     remove_unused_columns=False,
 
 )
 
-trainer = Trainer(
+trainer = Seq2SeqTrainer(
     model=model,
     args=training_args,
     train_dataset=tokenized_datasets,
@@ -122,3 +126,4 @@ print(f"Number of trainable parameters: {nb_trainable_params}")
 
 trainer.train()
 print("hi")
+model.save_pretrained("../final_result_code2")
