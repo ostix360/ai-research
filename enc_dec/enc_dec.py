@@ -126,4 +126,4 @@ print(f"Number of trainable parameters: {nb_trainable_params}")
 
 trainer.train()
 print("hi")
-model.save_pretrained("../final_result_code2")
+model.save_pretrained("../final_result_code")
