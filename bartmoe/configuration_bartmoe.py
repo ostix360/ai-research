@@ -4,12 +4,12 @@ from transformers import BartConfig
 class BartMoeConfig(BartConfig):
     def __init__(
             self,
-            num_experts=4,
+            num_expert=4,
             dead_zone=0.1,
             sliding_window=1024,
             **kwargs):
         super().__init__(**kwargs)
-        self.num_experts = num_experts
+        self.num_expert = num_expert
         self.dead_zone = dead_zone
         self.sliding_window = sliding_window
 

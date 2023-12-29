@@ -25,17 +25,24 @@ class BartBlender(nn.Module):
     def __init__(self, config: BartConfig):
         super().__init__()
         self.config = config
-        self.num_experts = config.num_experts
+        self.num_expert = config.num_expert
         self.linear = nn.ModuleList(
-            [nn.Linear(config.d_model, config.d_model) for _ in range(config.num_expert)])  # same dim as hidden_state
+            [nn.Linear(config.d_model, config.d_model, bias=False) for _ in range(config.num_expert)])  # same dim as hidden_state
 
-    def forward(self, hidden_states: torch.Tensor, blend_factor: torch.Tensor):
+    def forward(self, hidden_states: torch.Tensor, blend_factor: torch.Tensor, expert_output_ids: List[int]):
         # hidden_states: [num_expert, batch_size, seq_len, d_model]
         # blend_factor: [batch_size, num_experts]
         # blend hidden_states
-        for i, linear in enumerate(self.linear):
-            hidden_states[i] = linear(hidden_states[i])
-        return torch.einsum('eb,ebsd->bsd', blend_factor.transpose(0, 1), hidden_states)
+        j = 0
+        new_hidden_states = []
+        for i in range(len(self.linear)):   # memory leaks here in this loop
+            if i not in expert_output_ids:
+                continue
+            new_hidden_states.append(self.linear[i](hidden_states[j])) # rebase all hidden states to the same space
+            j += 1
+        hidden_states = torch.stack(new_hidden_states, dim=0)  # [num_expert, batch_size, seq_len, d_model]
+        hidden_states = torch.einsum('eb,ebsd->bsd', blend_factor.transpose(0, 1), hidden_states)
+        return hidden_states
 
 
 class BartMOEDecoder(BartPreTrainedModel):
@@ -189,13 +196,13 @@ class BartMOEDecoder(BartPreTrainedModel):
                 # [bsz, seq_len] -> [bsz, 1, tgt_seq_len, src_seq_len]
                 encoder_attention_mask = _prepare_4d_attention_mask_for_sdpa(
                     encoder_attention_mask,
-                    inputs_embeds.dtype,
+                    hidden_states.dtype,
                     tgt_len=input_shape[-1],
                 )
             else:
                 # [bsz, seq_len] -> [bsz, 1, tgt_seq_len, src_seq_len]
                 encoder_attention_mask = _prepare_4d_attention_mask(
-                    encoder_attention_mask, inputs_embeds.dtype, tgt_len=input_shape[-1]
+                    encoder_attention_mask, hidden_states.dtype, tgt_len=input_shape[-1]
                 )
 
         hidden_states = nn.functional.dropout(hidden_states, p=self.dropout, training=self.training)
@@ -299,21 +306,26 @@ class BartMOE(BartPreTrainedModel):
 
     def __init__(self, config: BartMoeConfig):
         super().__init__(config)
-        self.register_buffer("final_logits_bias", torch.zeros((1, self.model.shared.num_embeddings)))
 
         padding_idx, vocab_size = config.pad_token_id, config.vocab_size
         self.shared = nn.Embedding(vocab_size, config.d_model, padding_idx)
 
         self.encoder = BartEncoder(config, self.shared)
 
-        self.classifier = nn.Linear(config.hidden_size, config.num_experts)
+        self.classifier = nn.Linear(config.hidden_size, config.num_expert)
 
-        self.decoder = BartMOEDecoder(config, self.shared)
+        self.decoder = BartDecoder(config, self.shared)
 
-        self.experts = nn.ModuleList([BartDecoder(config, self.shared) for _ in range(config.num_experts)])
+        expert_config = BartConfig.from_dict(config.to_dict())
+        expert_config.decoder_layers = config.expert_num_layers
+        expert_config.decoder_attention_heads = config.expert_num_heads
+
+        self.experts = nn.ModuleList([BartDecoder(expert_config, self.shared) for _ in range(config.num_expert)])
         self.blender = BartBlender(config)
         self.dead_zone = config.dead_zone
-        self.lm_head = nn.Linear(config.d_model, self.model.shared.num_embeddings, bias=False)
+        self.lm_head = nn.Linear(config.d_model, self.shared.num_embeddings, bias=False)
+
+        self.register_buffer("final_logits_bias", torch.zeros((1, self.shared.num_embeddings)))
         # Initialize weights and apply final processing
         self.post_init()
 
@@ -332,6 +344,7 @@ class BartMOE(BartPreTrainedModel):
             decoder_inputs_embeds: Optional[torch.FloatTensor] = None,
             labels: Optional[torch.LongTensor] = None,
             encoder_labels: Optional[torch.LongTensor] = None,
+            expert_train: Optional[torch.LongTensor] = None,
             use_cache: Optional[bool] = None,
             output_attentions: Optional[bool] = None,
             output_hidden_states: Optional[bool] = None,
@@ -387,21 +400,28 @@ class BartMOE(BartPreTrainedModel):
             )
 
         # encoder_outputs[0] is the last_hidden_state
-        encoder_logits = self.classifier(encoder_outputs[0])
-        blend_factor = torch.softmax(encoder_logits, dim=-1)  # [batch_size, num_experts]
+        # take the first token of the last_hidden_state as the encoder output
+        encoder_logits = self.classifier(encoder_outputs[0][:, 0, :])
+        blend_factor = torch.softmax(encoder_logits, dim=-1)  # [batch_size, num_expert]
         encoder_loss = None
         if encoder_labels is not None:
             loss_fct = CrossEntropyLoss()
-            encoder_loss = loss_fct(encoder_logits.view(-1, self.config.num_experts), encoder_labels.view(-1))
-            blend_factor = torch.zeros_like(blend_factor).scatter_(1, encoder_labels.unsqueeze(1), 1.0)
+            encoder_loss = loss_fct(encoder_logits.view(-1, self.config.num_expert), encoder_labels.view(-1))
 
+            # blend_factor = torch.zeros_like(blend_factor).scatter_(1, encoder_labels.unsqueeze(1), 1.0)
+        if expert_train is not None:
+            blend_factor = torch.zeros_like(blend_factor).scatter_(1, expert_train.unsqueeze(1), 1.0)
         # encoder label for each batch must be the same
 
-        expert_outputs_list = torch.Tensor()
+
+
+        expert_outputs_list = None
+        expert_output_ids = []
         for i, expert in enumerate(self.experts):
             if self.dead_zone:
                 if blend_factor[:, i].mean() < self.dead_zone:
                     continue
+            expert_output_ids.append(i)
             expert_outputs = expert(  # [batch_size, seq_len, d_model]
                 input_ids=decoder_input_ids,
                 attention_mask=decoder_attention_mask,
@@ -416,19 +436,24 @@ class BartMOE(BartPreTrainedModel):
                 output_hidden_states=output_hidden_states,
                 return_dict=return_dict,
             )
-            expert_outputs_list = torch.cat((expert_outputs_list, expert_outputs.last_hidden_state.unsqueeze(0)), dim=0)
-        # expert_outputs_list: [num_experts, batch_size, seq_len, d_model]
-
-        # blend expert outputs
-        experts_outputs = self.blender(expert_outputs_list, blend_factor)  # [batch_size, seq_len, d_model]
-
+            if expert_outputs_list is None:     # for a seq len of 1024 and slinding window of 512 it takes 800MB
+                expert_outputs_list = expert_outputs.last_hidden_state.unsqueeze(0)
+            else:
+                expert_outputs_list = torch.cat((expert_outputs_list, expert_outputs.last_hidden_state.unsqueeze(0)), dim=0)
+        if expert_output_ids != [2]:
+            print(expert_output_ids)
+        # expert_outputs_list: [num_expert, batch_size, seq_len, d_model]
+        # pop out the blend factor if it is too small
+        blend_factor = blend_factor[:, expert_output_ids]
+        # blend expert outputs memory leaks
+        experts_outputs = self.blender(expert_outputs_list, blend_factor, expert_output_ids)  # [batch_size, seq_len, d_model]
+        # hidden_states = self.experts[0].embed_tokens(decoder_input_ids)
         # decoder outputs consists of (dec_features, past_key_value, dec_hidden, dec_attn)
         decoder_outputs = self.decoder(  # no input_ids here
-            hidden_state=experts_outputs,
-            input_shape=decoder_input_ids.shape,
+            input_ids=decoder_input_ids,
             attention_mask=decoder_attention_mask,
-            encoder_hidden_states=encoder_outputs[0],
-            encoder_attention_mask=attention_mask,
+            encoder_hidden_states=experts_outputs,
+            encoder_attention_mask=decoder_attention_mask,
             head_mask=decoder_head_mask,
             cross_attn_head_mask=cross_attn_head_mask,
             past_key_values=past_key_values,
@@ -439,7 +464,7 @@ class BartMOE(BartPreTrainedModel):
             return_dict=return_dict,
         )
 
-        lm_logits = self.lm_head(decoder_outputs.last_hidden_state)
+        lm_logits = self.lm_head(decoder_outputs[0])
         lm_logits = lm_logits + self.final_logits_bias.to(lm_logits.device)
 
         masked_lm_loss = None
@@ -448,14 +473,17 @@ class BartMOE(BartPreTrainedModel):
             loss_fct = CrossEntropyLoss()
             masked_lm_loss = loss_fct(lm_logits.view(-1, self.config.vocab_size), labels.view(-1))
 
+        # cleaning unused variables
+
         if not return_dict:
-            output = (lm_logits,) + decoder_outputs[1:] + encoder_outputs
+            output = (lm_logits,) + experts_outputs[1:] + encoder_outputs
             return ((masked_lm_loss,) + output) if masked_lm_loss is not None else output
 
         return Seq2SeqMoeModelOutput(
             loss=masked_lm_loss,
             encoder_loss=encoder_loss,
             logits=lm_logits,
+            encoder_logits=encoder_logits,
             past_key_values=decoder_outputs.past_key_values,
             decoder_hidden_states=decoder_outputs.hidden_states,
             decoder_attentions=decoder_outputs.attentions,
@@ -469,7 +497,8 @@ class BartMOE(BartPreTrainedModel):
     def _tie_weights(self):
         if self.config.tie_word_embeddings:
             self._tie_or_clone_weights(self.encoder.embed_tokens, self.shared)
-            self._tie_or_clone_weights(self.decoder.embed_tokens, self.shared)
+            for expert in self.experts:
+                self._tie_or_clone_weights(self.decoder.embed_tokens, self.shared)
 
     # copied from transformers.models.bart.modeling_bart.BartModel
     def get_input_embeddings(self):

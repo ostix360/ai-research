@@ -16,7 +16,10 @@ if is_flash_attn_2_available():
 # Copied from transformers.models.llama.modeling_llama._get_unpad_data
 def _get_unpad_data(attention_mask):
     seqlens_in_batch = attention_mask.sum(dim=-1, dtype=torch.int32)
-    indices = torch.nonzero(attention_mask.flatten(), as_tuple=False).flatten()
+    if torch.isnan(attention_mask).any() or torch.isinf(attention_mask).any():
+        print("Invalid values detected in attention_mask")
+    else:
+        indices = torch.nonzero(attention_mask.flatten(), as_tuple=False).flatten()
     max_seqlen_in_batch = seqlens_in_batch.max().item()
     cu_seqlens = F.pad(torch.cumsum(seqlens_in_batch, dim=0, dtype=torch.torch.int32), (1, 0))
     return (
@@ -163,6 +166,9 @@ class BartFlashAttention2(BartAttention):
         # in fp32. (LlamaRMSNorm handles it correctly)
 
         input_dtype = query_states.dtype
+        query_states = query_states.to(input_dtype)
+        key_states = key_states.to(input_dtype)
+        value_states = value_states.to(input_dtype)
         if input_dtype == torch.float32:
             # Handle the case where the model is quantized
             if hasattr(self.config, "_pre_quantization_dtype"):
@@ -311,7 +317,7 @@ def _prepare_4d_causal_attention_mask(
     input_shape: Union[torch.Size, Tuple, List],
     inputs_embeds: torch.Tensor,
     past_key_values_length: int,
-    sliding_window: Optional[int] = 1024,
+    sliding_window: Optional[int] = 500,
 ):
     """
     Creates a causal 4D mask of shape `(batch_size, 1, query_length, key_value_length)` from a 2D mask of shape
