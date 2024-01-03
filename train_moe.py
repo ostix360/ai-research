@@ -9,8 +9,6 @@ from transformers import AutoTokenizer, Seq2SeqTrainer, Seq2SeqTrainingArguments
 
 from bartmoe import utils
 from bartmoe.bart_patch import apply_sliding_window_patch
-from bartmoe.configuration_bartmoe import BartMoeConfig
-from bartmoe.modeling_bartmoe import BartMOE
 
 from torch.optim import AdamW
 from accelerate import Accelerator
@@ -18,30 +16,38 @@ from transformers import get_scheduler
 from tqdm.auto import tqdm
 import numpy as np
 
+from mixbart.configuration_mixbart import MixBartConfig
+from mixbart.modeling_mixbart import MixBart
+
 apply_sliding_window_patch() # 500 sliding window
 
-checkpoint = "./bart_moe_labeled"
+checkpoint = "facebook/bart-large"
 tokenizer = AutoTokenizer.from_pretrained(checkpoint)
-config: BartMoeConfig = AutoConfig.from_pretrained(checkpoint)
-config.sliding_window = 550
-config.expert_num_layers = 12
-config.expert_num_heads = 16
-config.dropout = 0.5
-config.max_length = 512
-
-model = BartMOE.from_pretrained(
-    checkpoint,
-    config=config,
-    attn_implementation="flash_attention_2",
-    torch_dtype=torch.bfloat16,
-    device_map=0,
+config: MixBartConfig = MixBartConfig.from_bart_config(
+    AutoConfig.from_pretrained(checkpoint),
+    num_expert=4,
+    dead_zone=0.1,
+    sliding_window=550,
 )
+config.mixtral_config._attn_implementation_internal = "flash_attention_2"
+config.max_length = config.mixtral_config.max_length = 200
+
+# model = MixBart.from_pretrained(
+#     checkpoint,
+#     config=config,
+#     attn_implementation="flash_attention_2",
+#     torch_dtype=torch.bfloat16,
+#     device_map=0,
+# )
 
 t_code_dataset = datasets.load_dataset("ise-uiuc/Magicoder-OSS-Instruct-75K", split="train[:75000]")
 e_code_dataset = datasets.load_dataset("ise-uiuc/Magicoder-OSS-Instruct-75K", split="train[-20:]")
 
-t_metamath_dataset = datasets.load_dataset("meta-math/MetaMathQA", split="train[:250000]")
+t_metamath_dataset = datasets.load_dataset("meta-math/MetaMathQA", split="train[:200000]")
 e_metamath_dataset = datasets.load_dataset("meta-math/MetaMathQA", split="train[-20:]")
+
+t_slimpajamas_dataset = datasets.load_dataset("cerebras/SlimPajama-627B", split="train", streaming=True)
+e_slimpajamas_dataset = datasets.load_dataset("cerebras/SlimPajama-627B", split="validation", streaming=True)
 
 
 cutoff_len = 1024
@@ -90,10 +96,10 @@ model.train()
 #     out = model(**batch)
 
 utils.freeze_original_bart_params(model)
-utils.freeze_expert_params(model, 0)
-utils.freeze_expert_params(model, 1)
+# utils.freeze_expert_params(model, 0)
+# utils.freeze_expert_params(model, 1)
 # utils.freeze_expert_params(model, 2)
-utils.freeze_expert_params(model, 3)
+# utils.freeze_expert_params(model, 3)
 
 nb_trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
 print(f"Number of trainable parameters: {nb_trainable_params}")
@@ -102,14 +108,14 @@ print(f"Number of trainable parameters: {nb_trainable_params}")
 
 training_args = Seq2SeqTrainingArguments(
     output_dir="./bart_moe_experts",
-    per_device_train_batch_size=3,
-    per_device_eval_batch_size=8,
+    per_device_train_batch_size=2,
+    per_device_eval_batch_size=10,
     predict_with_generate=True,
     evaluation_strategy="steps",
     logging_strategy="steps",
     logging_steps=50,
     num_train_epochs=1,
-    eval_steps=500,
+    eval_steps=5000,
     bf16=True,
     bf16_full_eval=True,
     save_strategy="steps",
@@ -129,9 +135,9 @@ trainer = Seq2SeqTrainer(
     data_collator=data_collator,
     compute_metrics=utils.compute_metrics
 )
-trainer.evaluate()
-trainer.train()
-trainer.evaluate()
+# trainer.evaluate()
+# trainer.train()
+# trainer.evaluate()
 
 
 #
@@ -205,5 +211,5 @@ trainer.evaluate()
 
 # train()
 print("saving model")
-model.save_pretrained("./bart_moe_experts")
-tokenizer.save_pretrained("./bart_moe_experts")
+model.save_pretrained("./mixbart_moe_experts")
+tokenizer.save_pretrained("./mixbart_moe_experts")

@@ -4,7 +4,7 @@ from typing import Tuple, Optional, Union, List
 import numpy as np
 import torch
 from transformers.modeling_attn_mask_utils import AttentionMaskConverter
-from transformers.modeling_outputs import Seq2SeqLMOutput
+from transformers.modeling_outputs import Seq2SeqLMOutput, MoeCausalLMOutputWithPast
 import evaluate
 
 perplexity_metric = evaluate.load("perplexity")
@@ -22,7 +22,7 @@ def debug_data_processing(train_dataloader):
 
 def freeze_original_bart_params(model):
     for n, p in model.named_parameters():
-        if "encoder" in n:
+        if "encoder" in n or "decoder" in n:
             if "decoder.embed_positions.weight" in n:
                 continue
             p.requires_grad = False
@@ -136,6 +136,11 @@ def compute_metrics(eval_preds):
 
 
 @dataclass
-class Seq2SeqMoeModelOutput(Seq2SeqLMOutput):
+class Seq2SeqMoeModelOutput(MoeCausalLMOutputWithPast):
     encoder_loss: Optional[torch.FloatTensor] = None
     encoder_logits: torch.FloatTensor = None
+    cross_attentions: Optional[List[torch.FloatTensor]] = None
+    encoder_last_hidden_state: Optional[torch.FloatTensor] = None
+    encoder_hidden_states: Optional[List[torch.FloatTensor]] = None
+    encoder_attentions: Optional[List[torch.FloatTensor]] = None
+
