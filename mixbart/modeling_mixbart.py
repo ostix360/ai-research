@@ -88,9 +88,6 @@ class MixtralRMSNorm(nn.Module):
 
     def forward(self, hidden_states):
         input_dtype = hidden_states.dtype
-        if torch.isnan(self.weight).any():
-            logger.warning("Weight of RMSNorm contains NaNs")
-            self.weight = nn.Parameter(torch.ones_like(self.weight.shape))
         hidden_states = hidden_states.to(torch.float32)
         variance = hidden_states.pow(2).mean(-1, keepdim=True)
         hidden_states = hidden_states * torch.rsqrt(variance + self.variance_epsilon)
@@ -127,9 +124,6 @@ class MixtralRotaryEmbedding(nn.Module):
         # x: [bs, num_attention_heads, seq_len, head_size]
         if seq_len > self.max_seq_len_cached:
             self._set_cos_sin_cache(seq_len=seq_len, device=x.device, dtype=x.dtype)
-
-        if torch.isnan(x).any():
-            logger.warning("Input of RotaryEmbedding contains NaNs")
 
         return (
             self.cos_cached[:seq_len].to(dtype=x.dtype),
@@ -644,11 +638,6 @@ class MixtralSparseMoeBlock(nn.Module):
     def forward(self, hidden_states: torch.Tensor, encoder_router_logits: torch.Tensor) -> torch.Tensor:
         """ """
 
-        if torch.isnan(hidden_states).any():
-            logger.warning("Input of MixtralSparseMoeBlock contains NaNs")
-        if torch.isnan(encoder_router_logits).any():
-            logger.warning("Input of MixtralSparseMoeBlock contains NaNs")
-
         batch_size, sequence_length, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
         # router_logits: (batch * sequence_length, n_experts)
@@ -713,6 +702,7 @@ class MixtralDecoderLayer(nn.Module):
         self.encoder_attn = MISTRAL_ATTENTION_CLASSES[config._attn_implementation](config, layer_idx * 2 + 1)
         self.encoder_attn_layer_norm = MixtralRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.block_sparse_moe = MixtralSparseMoeBlock(config)
+        self.moe_layernorm = MixtralRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
     def forward(
             self,
@@ -751,13 +741,7 @@ class MixtralDecoderLayer(nn.Module):
 
         residual = hidden_states
 
-        if torch.isnan(hidden_states).any():
-            logger.warning("residual of MixtralDecoderLayer contains NaNs")
-
         hidden_states = self.input_layernorm(hidden_states)
-
-        if torch.isnan(hidden_states).any():
-            logger.warning("normalized hidden_state of MixtralDecoderLayer contains NaNs")
 
         # Self Attention
         hidden_states, self_attn_weights, present_key_value = self.self_attn(
@@ -769,15 +753,9 @@ class MixtralDecoderLayer(nn.Module):
             use_cache=use_cache,
         )
 
-        if torch.isnan(hidden_states).any():
-            logger.warning("self attn hidden_state of MixtralDecoderLayer contains NaNs")
-
         hidden_states = residual + hidden_states
 
         hidden_states = self.post_attention_layernorm(hidden_states)
-
-        if torch.isnan(hidden_states).any():
-            logger.warning("post attn normalized hidden_state of MixtralDecoderLayer contains NaNs")
 
         # Cross-Attention Block
         cross_attn_weights = None
@@ -794,22 +772,17 @@ class MixtralDecoderLayer(nn.Module):
                 output_attentions=output_attentions,
             )
 
-            if torch.isnan(hidden_states).any():
-                logger.warning("cross attn hidden_state of MixtralDecoderLayer contains NaNs")
             hidden_states = residual + hidden_states
             hidden_states = self.encoder_attn_layer_norm(hidden_states)
 
-            if torch.isnan(hidden_states).any():
-                logger.warning("cross attn normalized hidden_state of MixtralDecoderLayer contains NaNs")
-            # add cross-attn to positions 3,4 of present_key_value tuple
+
 
         # Fully Connected
         residual = hidden_states
         hidden_states, router_logits = self.block_sparse_moe(hidden_states, encoder_router_logits)
 
-        if torch.isnan(hidden_states).any():
-            logger.warning("moe hidden_state of MixtralDecoderLayer contains NaNs")
         hidden_states = residual + hidden_states
+
 
         outputs = (hidden_states,)
 
@@ -913,10 +886,6 @@ class MixtralModel(MixtralPreTrainedModel):
                 past_key_values = DynamicCache.from_legacy_cache(past_key_values)
             past_key_values_length = past_key_values.get_usable_length(seq_length)
 
-            # if torch.isnan(past_key_values.key_cache[0]).any():
-            #     logger.warning("past_key_values.key_cache of MixtralModel contains NaNs")
-            # if torch.isnan(past_key_values.value_cache[0]).any():
-            #     logger.warning("past_key_values.value_cache of MixtralModel contains NaNs")
 
         if position_ids is None:
             device = input_ids.device if input_ids is not None else inputs_embeds.device
@@ -930,8 +899,6 @@ class MixtralModel(MixtralPreTrainedModel):
         if inputs_embeds is None:
             inputs_embeds = self.embed_tokens(input_ids)
 
-        if torch.isnan(inputs_embeds).any():
-            logger.warning("inputs_embeds of MixtralModel contains NaNs")
 
         if attention_mask is not None and self._use_flash_attention_2 and use_cache:
             is_padding_right = attention_mask[:, -1].sum().item() != batch_size
@@ -1010,8 +977,6 @@ class MixtralModel(MixtralPreTrainedModel):
 
         hidden_states = self.norm(hidden_states)
 
-        if torch.isnan(hidden_states).any():
-            logger.warning("normalized hidden_states of MixtralModel contains NaNs")
 
         # add hidden states from the last decoder layer
         if output_hidden_states:
