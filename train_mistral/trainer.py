@@ -1,24 +1,33 @@
 import numpy as np
 import torch
-from datasets import load_dataset, concatenate_datasets
+from datasets import load_dataset, concatenate_datasets, Dataset
 from transformers import TrainingArguments
 from trl import SFTTrainer
 from unsloth import FastMistralModel
+import fff_mistral_patch
+
+fff_mistral_patch.patch_to_unsloth_mistral()
 
 
 model_name = "unsloth/mistral-7b-bnb-4bit"
-max_seq_length = 4096
+max_seq_length = 2048
 dtype = None
 load_in_4bit = True
 
-t_code_dataset = load_dataset("ise-uiuc/Magicoder-OSS-Instruct-75K", split="train[:70000]")
-e_code_dataset = load_dataset("ise-uiuc/Magicoder-OSS-Instruct-75K", split="train[-100:]")
+t_code_dataset = load_dataset("ise-uiuc/Magicoder-OSS-Instruct-75K", split="train[:2500]")
+e_code_dataset = load_dataset("ise-uiuc/Magicoder-OSS-Instruct-75K", split="train[-20:]")
 
-t_metamath_dataset = load_dataset("meta-math/MetaMathQA", split="train[:100000]")
-e_metamath_dataset = load_dataset("meta-math/MetaMathQA", split="train[-100:]")
+t_metamath_dataset = load_dataset("meta-math/MetaMathQA", split="train[:2500]")
+e_metamath_dataset = load_dataset("meta-math/MetaMathQA", split="train[-20:]")
 
-t_code2_dataset = load_dataset("ise-uiuc/Magicoder-Evol-Instruct-110K", split="train[:100000]")
-e_code2_dataset = load_dataset("ise-uiuc/Magicoder-Evol-Instruct-110K", split="train[-100:]")
+# t_code2_dataset = load_dataset("ise-uiuc/Magicoder-Evol-Instruct-110K", split="train[:370]")
+# e_code2_dataset = load_dataset("ise-uiuc/Magicoder-Evol-Instruct-110K", split="train[-20:]")
+
+t_ultra_chat_dataset = load_dataset("HuggingFaceH4/ultrachat_200k", split="train_sft[:5000]")
+e_ultra_chat_dataset = load_dataset("HuggingFaceH4/ultrachat_200k", split="test_sft[-20:]")
+
+t_self_reasoning_dataset = load_dataset("freecs/ArtificialThinkerSet")
+e_self_reasoning_dataset = load_dataset("freecs/ArtificialThinkerSet")
 
 model, tokenizer = FastMistralModel.from_pretrained(
     model_name=model_name,
@@ -44,6 +53,33 @@ def formatting_prompts_func(examples):
     return {"text": texts, }
 
 
+def formatting_prompt_for_ultra_chat(examples):
+    convs = examples["messages"]
+    output = []
+    for conv in convs:
+        context = ""
+        for message in conv:
+            if message["role"] == "user":
+                context += "###USER: " + message["content"] + "\n"
+            elif message["role"] == "assistant":
+                context += "###ASSISTANT: " + message["content"] + "\n"
+                output.append(context)
+    return Dataset.from_dict({"text": output, })
+
+reasoning_prompt_format = """###USER: {}
+###ASSISTANT: {} {}"""
+
+def format_prompt_for_self_reasoning(examples):
+    prompt = examples["prompt"]
+    response = examples["response"]
+    reasoning = examples["reasoning"]
+    texts = []
+    for p, r, re in zip(prompt, response, reasoning):
+        text = reasoning_prompt_format.format(p, re, r)
+        texts.append(text)
+    return {"text": texts, }
+
+
 t_metamath_formated_datasets = t_metamath_dataset.map(formatting_prompts_func, batched=True, remove_columns=["query", "response"])
 e_metamath_formated_datasets = e_metamath_dataset.map(formatting_prompts_func, batched=True, remove_columns=["query", "response"])
 
@@ -56,73 +92,98 @@ e_code_formated_datasets = e_code_dataset.map(formatting_prompts_func, batched=T
 user_key = "instruction"
 assistant_key = "response"
 
-t_code2_formated_datasets = t_code2_dataset.map(formatting_prompts_func, batched=True, remove_columns=["instruction", "response"])
-e_code2_formated_datasets = e_code2_dataset.map(formatting_prompts_func, batched=True, remove_columns=["instruction", "response"])
+# t_code2_formated_datasets = t_code2_dataset.map(formatting_prompts_func, batched=True, remove_columns=["instruction", "response"])
+# e_code2_formated_datasets = e_code2_dataset.map(formatting_prompts_func, batched=True, remove_columns=["instruction", "response"])
 
-formated_datasets = concatenate_datasets([t_metamath_formated_datasets, t_code_formated_datasets, t_code2_formated_datasets])
-e_formated_datasets = concatenate_datasets([e_metamath_formated_datasets, e_code_formated_datasets, e_code2_formated_datasets])
+t_ultra_chat_formated_datasets = formatting_prompt_for_ultra_chat(t_ultra_chat_dataset)
+e_ultra_chat_formated_datasets = formatting_prompt_for_ultra_chat(e_ultra_chat_dataset)
+
+t_self_reasoning_formated_datasets = t_self_reasoning_dataset.map(format_prompt_for_self_reasoning, batched=True, remove_columns=["prompt", "response", "reasoning"])
+e_self_reasoning_formated_datasets = e_self_reasoning_dataset.map(format_prompt_for_self_reasoning, batched=True, remove_columns=["prompt", "response", "reasoning"])
+
+t_list = [t_metamath_formated_datasets]
+e_list = [e_metamath_formated_datasets]
+
+
+def add_ds(t_ds, e_ds):
+    t_list.append(t_ds)
+    e_list.append(e_ds)
+
+
+add_ds(t_code_formated_datasets, e_code_formated_datasets)
+# add_ds(t_code2_formated_datasets, e_code2_formated_datasets)
+add_ds(t_ultra_chat_formated_datasets, e_ultra_chat_formated_datasets)
+add_ds(t_self_reasoning_formated_datasets["train"], e_self_reasoning_formated_datasets["train"])
+
+formated_datasets = concatenate_datasets(t_list).shuffle()
+e_formated_datasets = concatenate_datasets(e_list).shuffle()
+
+intermediate_size = [32, 32, 32, 32]
+num_fff_layers = 4
+activation_func = ["sigmoid", "laplace", "sigmoid", "laplace"]
+module = "up_proj"
+
+
+    # target_modules=[module,],
+    # intermediate_size=intermediate_size,
+    # num_fff=num_fff_layers,
+    # activation_func=activation_func,
+    # use_gradient_checkpointing=True,    # When set to true VRAM grow during training (why?)
 
 model = FastMistralModel.get_peft_model(
     model,
-    r=64,
-    target_modules=["q_proj", "k_proj", "v_proj", "o_proj", # attention
-                    "gate_proj", "up_proj", "down_proj", ], # FFN
-    lora_alpha=32,
-    lora_dropout=0,
-    bias="none",
-    use_gradient_checkpointing=False,
+    target_modules=[module,],
+    intermediate_size=intermediate_size,
+    num_fff=num_fff_layers,
+    activation_func=activation_func,
+    use_gradient_checkpointing=True,
     random_state=12,
     max_seq_length=max_seq_length,
 )
 model.print_trainable_parameters()
 
-def compute_metrics(pred):
-    logits, labels = pred
-    predictions = np.argmax(logits, axis=-1)
-    labels = np.where(labels == -100, 0, labels)
-    accuracy = np.array([])
-    for i in range(len(predictions)):
-        valid_indices = np.where((predictions[i] != 0) & (labels[i] != 0))
-        valid_predictions = predictions[i][valid_indices]
-        valid_labels = labels[i][valid_indices]
-        correct_predictions = np.sum(valid_predictions == valid_labels)
-        total_predictions = len(valid_predictions)
-        accuracy = np.append(accuracy, correct_predictions / total_predictions)
-    print("Accuracy: ", accuracy.mean())
-    return {"accuracy": accuracy.mean()}
+trained_model_name = f"hug-ultra-lora-{intermediate_size}-{num_fff_layers}-{activation_func}-{module}"
+# trained_model_name = f"lora-36-18-all"
+
+batch_size = 3
+steps = len(formated_datasets["text"])
+
+
+print(f"Training {steps} steps the model: {trained_model_name}")
 
 trainer = SFTTrainer(
     model=model,
     tokenizer=tokenizer,
     dataset_text_field="text",
+    max_seq_length=max_seq_length,
     train_dataset=formated_datasets,
     eval_dataset=e_formated_datasets,
     args=TrainingArguments(
-        per_device_train_batch_size=1,
-        per_device_eval_batch_size=1,
-        warmup_steps=5,
+        per_device_train_batch_size=batch_size,
+        per_device_eval_batch_size=batch_size,
+        gradient_accumulation_steps=1,
+        load_best_model_at_end=False,
+        warmup_steps=1,
         num_train_epochs=1,
         report_to=["none"],
         evaluation_strategy="steps",
-        eval_steps=10000,
+        eval_steps=steps//batch_size,
         learning_rate=5e-5,
         fp16=not torch.cuda.is_bf16_supported(),
         bf16=torch.cuda.is_bf16_supported(),
-        bf16_full_eval= torch.cuda.is_bf16_supported(),
+        bf16_full_eval=torch.cuda.is_bf16_supported(),
         fp16_full_eval=not torch.cuda.is_bf16_supported(),
-        logging_steps=50,
+        logging_steps=50//batch_size,
         optim="adamw_8bit",
-        save_total_limit=2,
+        max_steps=steps//batch_size,
+        save_total_limit=1,
         save_strategy="steps",
-        save_steps=10000,
+        save_steps=steps//batch_size,
         weight_decay=0.01,
         lr_scheduler_type="linear",
         seed=12,
-        output_dir="outputs",
+        output_dir="outputs-"+trained_model_name,
     ),
 )
-
-trainer.evaluate()
 trainer.train()
-trainer.evaluate()
-trainer.save_model("my_mistral-7b-bnb-4bit")
+model.save_pretrained("fff-mistral-"+trained_model_name)

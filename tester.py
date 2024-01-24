@@ -5,13 +5,16 @@ from transformers import AutoModelForCausalLM, AutoTokenizer, AutoModelForSeq2Se
 # from bartmoe.bart_patch import apply_sliding_window_patch
 
 # apply_sliding_window_patch()
+from fff_mistral import fff_mistral_patch
 
-checkpoint = "./train_mistral/my_mistral-7b-bnb-4bit/"
+fff_mistral_patch.patch_to_unsloth_mistral()
 
-model = AutoModelForCausalLM.from_pretrained(checkpoint)
+checkpoint = "./fff_my_mistral-7b-bnb-4bit"
+
+model = AutoModelForCausalLM.from_pretrained(checkpoint, attn_implementation="flash_attention_2",)
 tokenizer = AutoTokenizer.from_pretrained(checkpoint)
 
-prompt = "###USER: Solve the following equation: 2x + 3 = 5 - x and write the corresponding python code."
+prompt = "###USER: Solve the following equation: 2x + 3 = 5 - x and write a python code that solve this equation for checking."
 
 input_ids = tokenizer(prompt, return_tensors="pt")
 
