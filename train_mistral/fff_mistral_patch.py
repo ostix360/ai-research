@@ -10,7 +10,7 @@ from transformers import MistralConfig, set_seed
 from transformers.activations import ACT2FN
 from transformers.models.mistral.modeling_mistral import MISTRAL_ATTENTION_CLASSES, MistralRMSNorm
 
-from fff.config import fffConfig
+from train_mistral.fff.config import fffConfig
 
 
 class MistralMLP(nn.Module):
@@ -157,24 +157,76 @@ def get_peft_model(
         use_gradient_checkpointing=True,
         random_state=3407,
         max_seq_length=2048,  # not used anymore
+        init_lora_weights=True,
+        use_rslora=False,
+        loftq_config={},
         **kwargs,
 ):
     from unsloth.models._utils import __version__
     from unsloth.kernels import apply_lora_mlp, apply_lora_qkv, apply_lora_o
     from unsloth.models._utils import prepare_model_for_kbit_training
+    from unsloth import patch_saving_functions
     from transformers.models.llama.modeling_llama import logger
     from peft import LoraConfig
     from peft import get_peft_model as _get_peft_model
+    from peft import PeftModelForCausalLM
 
     assert (max_seq_length <= model.max_seq_length)
-
+    if isinstance(model, PeftModelForCausalLM):
+        raise TypeError(
+            "Unsloth: Your model already has LoRA adapters. No need to run this again!"
+        )
+    pass
     set_seed(random_state)
+    import inspect
+    signature = str(inspect.signature(LoraConfig))
+    SUPPORTS_LOFTQ = "loftq_config" in signature
+    SUPPORTS_RSLORA = "use_rslora" in signature
+
+    if init_lora_weights == "loftq":
+        if not SUPPORTS_LOFTQ:
+            import peft
+            raise RuntimeError(
+                f"Unsloth: Your PEFT version of {peft.__version__} does not support LoftQ init.\n" \
+                "Please install PEFT 0.7.2 or higher.\n" \
+                "You can also install from source: `pip install git+https://github.com/huggingface/peft.git"
+            )
+        pass
+
+        if loftq_config == {}:
+            from peft import LoftQConfig
+            logger.warning_once(
+                f"Unsloth: init_lora_weights = `loftq` is set, but `loftq_config` is None.\n" \
+                f"We shall use `loftq_config = LoftQConfig(loftq_bits = 4, loftq_iter = 1)`."
+            )
+            loftq_config = LoftQConfig(loftq_bits=4, loftq_iter=1)
+        pass
+
+        if hasattr(model.config, "quantization_config"):
+            raise ValueError(
+                "Unsloth: You are using `loftq` init, yet `load_in_4bit = True` was set.\n" \
+                "Reload your model without any quantization by setting `load_in_4bit = False`."
+            )
+        pass
+    pass
+    assert (type(use_rslora) is bool)
+    if use_rslora:
+        if not SUPPORTS_RSLORA:
+            # We manually check for PEFT
+            import peft
+            raise RuntimeError(
+                f"Unsloth: Your PEFT version of {peft.__version__} does not support `use_rslora`.\n" \
+                "Please install PEFT 0.7.2 or higher.\n" \
+                "You can also install from source: `pip install git+https://github.com/huggingface/peft.git"
+            )
+        pass
+    pass
 
     accepted_modules = frozenset(("gate_proj", "up_proj",), )
     model.config.update({"unsloth_version": __version__})
-    for module in target_modules:
-        assert (module in accepted_modules)
-    pass
+    # for module in target_modules:
+    # assert (module in accepted_modules)
+    # pass
 
     # Get fff
     fff_config = fffConfig(
@@ -188,15 +240,22 @@ def get_peft_model(
 
     lora_target = ["q_proj", "k_proj", "v_proj", "o_proj",
                    "gate_proj", "up_proj", "down_proj"]
-
-    lora_config = LoraConfig(
-        r=32,
-        bias="none",
-        lora_alpha=16,
-        task_type=TaskType.CAUSAL_LM,
+    arguments = dict(
+        r=24,
+        lora_alpha=12,
         target_modules=lora_target,
         lora_dropout=0,
+        bias="none",
+        task_type=TaskType.CAUSAL_LM,
+        init_lora_weights=init_lora_weights,
+        loftq_config=loftq_config,
+        use_rslora=use_rslora,
+        **kwargs,
     )
+    if not SUPPORTS_LOFTQ: del arguments["loftq_config"]
+    if not SUPPORTS_RSLORA: del arguments["use_rslora"]
+
+    lora_config = LoraConfig(**arguments)
 
     model = prepare_model_for_kbit_training(
         model,
@@ -230,11 +289,10 @@ def get_peft_model(
         #     n_mlp += 1
         # else:
         logger.warning_once(
-                "Unsloth cannot patch MLP layers with our manual autograd engine since either LoRA adapters\n"
-                "are not enabled or a bias term (like in Qwen) is used."
-                "This is not a problem if you are using fff config."
-            )
-
+            "Unsloth cannot patch MLP layers with our manual autograd engine since either LoRA adapters\n"
+            "are not enabled or a bias term (like in Qwen) is used."
+            "This is not a problem if you are using fff config."
+        )
 
         # QKV attention patching
         q_proj = layer.self_attn.q_proj
@@ -275,6 +333,7 @@ def get_peft_model(
         f"Unsloth {__version__} patched {len(model.base_model.model.model.layers)} layers with " \
         f"{n_qkv} QKV layers, {n_o} O layers and {n_mlp} MLP layers.",
     )
+    patch_saving_functions(model)
 
     # Patch cross entropy loss labels
     # Fixes https://github.com/unslothai/unsloth/issues/10
@@ -311,7 +370,7 @@ def _create_and_replace(
     from peft.tuners import loha
     from peft.tuners import lokr
     from peft.tuners import oft
-    import fff
+    from train_mistral.fff import fffModel, fffConfig
     if isinstance(config, adalora.AdaLoraConfig):
         adalora.AdaLoraModel._create_and_replace(self, config, *args, **kwargs)
     elif isinstance(config, lora.LoraConfig):
@@ -322,8 +381,8 @@ def _create_and_replace(
         lokr.LoKrModel._create_and_replace(self, config, *args, **kwargs)
     elif isinstance(config, oft.OFTConfig):
         oft.OFTModel._create_and_replace(self, config, *args, **kwargs)
-    elif isinstance(config, fff.fffConfig):
-        fff.fffModel._create_and_replace(self, config, *args, **kwargs)
+    elif isinstance(config, fffConfig):
+        fffModel._create_and_replace(self, config, *args, **kwargs)
     else:
         raise ValueError(f"Unsupported config type {type(config)}, should be one of {COMPATIBLE_TUNER_TYPES}.")
 
@@ -335,7 +394,8 @@ def _create_new_module(config, adapter_name, target, **kwargs):
     from peft.tuners import loha
     from peft.tuners import lokr
     from peft.tuners import oft
-    import fff
+
+    from train_mistral.fff import fffModel, fffConfig
 
     if isinstance(config, adalora.AdaLoraConfig):
         new_module = adalora.AdaLoraModel._create_new_module(config, adapter_name, target, **kwargs)
@@ -347,8 +407,8 @@ def _create_new_module(config, adapter_name, target, **kwargs):
         new_module = lokr.LoKrModel._create_new_module(config, adapter_name, target, **kwargs)
     elif isinstance(config, oft.OFTConfig):
         new_module = oft.OFTModel._create_new_module(config, adapter_name, target, **kwargs)
-    elif isinstance(config, fff.fffConfig):
-        new_module = fff.fffModel._create_new_module(config, adapter_name, target, **kwargs)
+    elif isinstance(config, fffConfig):
+        new_module = fffModel._create_new_module(config, adapter_name, target, **kwargs)
     else:
         raise ValueError(f"Unknown config type {type(config)}, should be one of {COMPATIBLE_TUNER_TYPES}.")
     return new_module
@@ -544,7 +604,6 @@ def save_pretrained(
                 for shared_tensor_name in names[1:]:
                     output_state_dict[shared_tensor_name] = output_state_dict[shared_tensor_name].clone()
 
-
             safe_save_file(
                 output_state_dict,
                 os.path.join(output_dir, SAFETENSORS_WEIGHTS_NAME),
@@ -582,12 +641,123 @@ def save_pretrained(
         peft_config.inference_mode = inference_mode
 
 
+def load_adapter(self, model_id: str, adapter_name: str, is_trainable: bool = False, **kwargs: Any):
+    """
+        Load a trained adapter into the model.
+
+        The name for the new adapter should be unique.
+
+        The new adapter is not automatically set as the active adapter. Use [`PeftModel.set_adapter`] to set the active
+        adapter.
+
+        Args:
+            adapter_name (`str`):
+                The name of the adapter to be added.
+            peft_config ([`PeftConfig`]):
+                The configuration of the adapter to be added.
+            is_trainable (`bool`, *optional*, defaults to `False`):
+                Whether the adapter should be trainable or not. If `False`, the adapter will be frozen and can only be
+                used for inference.
+            kwargs: (`optional`):
+                Additional arguments to modify the way the adapter is loaded, e.g. the token for Hugging Face Hub.
+        """
+    from peft.utils import infer_device
+    from peft import PEFT_TYPE_TO_CONFIG_MAPPING, load_peft_weights, PeftConfig
+    import inspect
+    from train_mistral.fff.model import _set_peft_model_state_dict
+    from accelerate import dispatch_model
+    from accelerate.utils import get_balanced_memory, infer_auto_device_map
+    from accelerate.hooks import AlignDevicesHook, add_hook_to_module, remove_hook_from_submodules
+    hf_hub_download_kwargs, kwargs = self._split_kwargs(kwargs)
+
+    torch_device = infer_device()
+
+    if adapter_name not in self.peft_config:
+        # load the config
+        peft_config = PEFT_TYPE_TO_CONFIG_MAPPING[
+            PeftConfig._get_peft_type(
+                model_id,
+                **hf_hub_download_kwargs,
+            )
+        ].from_pretrained(
+            model_id,
+            **hf_hub_download_kwargs,
+        )
+        if peft_config.is_prompt_learning and is_trainable:
+            raise ValueError("Cannot set a prompt learning adapter to trainable when loading pretrained adapter.")
+        else:
+            peft_config.inference_mode = not is_trainable
+        self.add_adapter(adapter_name, peft_config)
+
+    adapters_weights = load_peft_weights(model_id, device=torch_device, **hf_hub_download_kwargs)
+    if adapter_name == "lora":
+        new_adapters_weights = {}
+        for key in adapters_weights.keys():
+            suffix_index = key.index(".weight")
+            suffix = key[suffix_index - 2:suffix_index] + key[suffix_index:]
+            is_base_layer = "base_layer" in key[suffix_index - 17:suffix_index]
+            if is_base_layer:
+                suffix_index -= 11
+            prefix = key[:suffix_index - 2]
+            new_key = prefix + ".lora" + suffix
+            new_adapters_weights[new_key] = adapters_weights[key]
+        adapters_weights = new_adapters_weights
+
+    # load the weights into the model
+
+    load_result = _set_peft_model_state_dict(self, adapters_weights, adapter_name=adapter_name)
+    if (
+            (getattr(self, "hf_device_map", None) is not None)
+            and (len(set(self.hf_device_map.values()).intersection({"cpu", "disk"})) > 0)
+            and len(self.peft_config) == 1
+    ):
+        device_map = kwargs.get("device_map", "auto")
+        max_memory = kwargs.get("max_memory", None)
+        offload_dir = kwargs.get("offload_folder", None)
+        offload_index = kwargs.get("offload_index", None)
+
+        dispatch_model_kwargs = {}
+        # Safety checker for previous `accelerate` versions
+        # `offload_index` was introduced in https://github.com/huggingface/accelerate/pull/873/
+
+        if "offload_index" in inspect.signature(dispatch_model).parameters:
+            dispatch_model_kwargs["offload_index"] = offload_index
+
+        no_split_module_classes = self._no_split_modules
+
+        if device_map != "sequential":
+            max_memory = get_balanced_memory(
+                self,
+                max_memory=max_memory,
+                no_split_module_classes=no_split_module_classes,
+                low_zero=(device_map == "balanced_low_0"),
+            )
+        if isinstance(device_map, str):
+            device_map = infer_auto_device_map(
+                self, max_memory=max_memory, no_split_module_classes=no_split_module_classes
+            )
+        dispatch_model(
+            self,
+            device_map=device_map,
+            offload_dir=offload_dir,
+            **dispatch_model_kwargs,
+        )
+
+        hook = AlignDevicesHook(io_same_device=True)
+        if self.peft_config[adapter_name].is_prompt_learning:
+            remove_hook_from_submodules(self.prompt_encoder)
+        add_hook_to_module(self.get_base_model(), hook)
+
+    # Set model in evaluation mode to deactivate Dropout modules by default
+    if not is_trainable:
+        self.eval()
+    return load_result
 
 
 def patch_to_unsloth_mistral():
     from unsloth.models import llama
-    import fff
-    from fff.model import patch_peft_for_loading
+    from train_mistral.fff import fffLayer, model
+    from train_mistral.fff.model import patch_peft_for_loading
     from peft.tuners import mixed
     from peft import PeftType
     from typing import Union
@@ -597,12 +767,15 @@ def patch_to_unsloth_mistral():
 
     # Mix patch
     peft.mixed_model.COMPATIBLE_TUNER_TYPES = mixed.COMPATIBLE_TUNER_TYPES + (PeftType.FFF,)
+
+    peft.mixed_model.PEFT_TYPE_TO_MODEL_MAPPING[PeftType.FFF] = model.fffModel
     mixed.model.PREFIXES.append("fff")
-    mixed.model.Layers = mixed.model.Layers + (fff.fffLayer,)
+    mixed.model.Layers = mixed.model.Layers + (fffLayer,)
     mixed.model.Configs = Union[mixed.model.Configs, fffConfig]
     mixed.model.MixedModel._create_and_replace = _create_and_replace
     mixed.model.MixedModel._create_new_module = _create_new_module
     peft.PeftMixedModel.save_pretrained = save_pretrained
+    peft.peft_model.PeftModel.load_adapter = load_adapter
 
     # fix remove colom
     from transformers import Trainer

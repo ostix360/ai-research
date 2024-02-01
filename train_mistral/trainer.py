@@ -14,17 +14,17 @@ max_seq_length = 2048
 dtype = None
 load_in_4bit = True
 
-t_code_dataset = load_dataset("ise-uiuc/Magicoder-OSS-Instruct-75K", split="train[:2500]")
-e_code_dataset = load_dataset("ise-uiuc/Magicoder-OSS-Instruct-75K", split="train[-20:]")
+t_code_dataset = load_dataset("ise-uiuc/Magicoder-OSS-Instruct-75K", split="train[:100]")
+e_code_dataset = load_dataset("ise-uiuc/Magicoder-OSS-Instruct-75K", split="train[-1:]")
 
-t_metamath_dataset = load_dataset("meta-math/MetaMathQA", split="train[:2500]")
-e_metamath_dataset = load_dataset("meta-math/MetaMathQA", split="train[-20:]")
+t_metamath_dataset = load_dataset("meta-math/MetaMathQA", split="train[:100]")
+e_metamath_dataset = load_dataset("meta-math/MetaMathQA", split="train[-1:]")
 
 # t_code2_dataset = load_dataset("ise-uiuc/Magicoder-Evol-Instruct-110K", split="train[:370]")
 # e_code2_dataset = load_dataset("ise-uiuc/Magicoder-Evol-Instruct-110K", split="train[-20:]")
 
-t_ultra_chat_dataset = load_dataset("HuggingFaceH4/ultrachat_200k", split="train_sft[:5000]")
-e_ultra_chat_dataset = load_dataset("HuggingFaceH4/ultrachat_200k", split="test_sft[-20:]")
+t_ultra_chat_dataset = load_dataset("HuggingFaceH4/ultrachat_200k", split="train_sft[:250]")
+e_ultra_chat_dataset = load_dataset("HuggingFaceH4/ultrachat_200k", split="test_sft[:5]")
 
 t_self_reasoning_dataset = load_dataset("freecs/ArtificialThinkerSet")
 e_self_reasoning_dataset = load_dataset("freecs/ArtificialThinkerSet")
@@ -102,7 +102,7 @@ t_self_reasoning_formated_datasets = t_self_reasoning_dataset.map(format_prompt_
 e_self_reasoning_formated_datasets = e_self_reasoning_dataset.map(format_prompt_for_self_reasoning, batched=True, remove_columns=["prompt", "response", "reasoning"])
 
 t_list = [t_metamath_formated_datasets]
-e_list = [e_metamath_formated_datasets]
+e_list = []
 
 
 def add_ds(t_ds, e_ds):
@@ -110,17 +110,18 @@ def add_ds(t_ds, e_ds):
     e_list.append(e_ds)
 
 
-add_ds(t_code_formated_datasets, e_code_formated_datasets)
+# add_ds(t_code_formated_datasets, e_code_formated_datasets)
 # add_ds(t_code2_formated_datasets, e_code2_formated_datasets)
 add_ds(t_ultra_chat_formated_datasets, e_ultra_chat_formated_datasets)
-add_ds(t_self_reasoning_formated_datasets["train"], e_self_reasoning_formated_datasets["train"])
+# for i in range(6):
+#     add_ds(t_self_reasoning_formated_datasets["train"], e_self_reasoning_formated_datasets["train"])
 
-formated_datasets = concatenate_datasets(t_list).shuffle()
-e_formated_datasets = concatenate_datasets(e_list).shuffle()
+formated_datasets = concatenate_datasets(t_list).shuffle(seed=12)
+e_formated_datasets = concatenate_datasets(e_list).shuffle(seed=12)
 
-intermediate_size = [32, 32, 32, 32]
-num_fff_layers = 4
-activation_func = ["sigmoid", "laplace", "sigmoid", "laplace"]
+intermediate_size = 128
+num_fff_layers = 6
+activation_func = "gelu_new"
 module = "up_proj"
 
 
@@ -132,7 +133,15 @@ module = "up_proj"
 
 model = FastMistralModel.get_peft_model(
     model,
-    target_modules=[module,],
+    target_modules=[
+        f"layers.13.mlp.{module}",
+        f"layers.14.mlp.{module}",
+        f"layers.15.mlp.{module}",
+        f"layers.16.mlp.{module}",
+        f"layers.17.mlp.{module}",
+        f"layers.18.mlp.{module}",
+        f"layers.19.mlp.{module}",
+    ],
     intermediate_size=intermediate_size,
     num_fff=num_fff_layers,
     activation_func=activation_func,
@@ -163,9 +172,11 @@ trainer = SFTTrainer(
         per_device_eval_batch_size=batch_size,
         gradient_accumulation_steps=1,
         load_best_model_at_end=False,
+        resume_from_checkpoint="outputs-"+trained_model_name,
         warmup_steps=1,
         num_train_epochs=1,
         report_to=["none"],
+        max_steps=1,
         evaluation_strategy="steps",
         eval_steps=steps//batch_size,
         learning_rate=5e-5,
@@ -175,15 +186,17 @@ trainer = SFTTrainer(
         fp16_full_eval=not torch.cuda.is_bf16_supported(),
         logging_steps=50//batch_size,
         optim="adamw_8bit",
-        max_steps=steps//batch_size,
+        # max_steps=steps//batch_size,
         save_total_limit=1,
         save_strategy="steps",
         save_steps=steps//batch_size,
         weight_decay=0.01,
         lr_scheduler_type="linear",
         seed=12,
-        output_dir="outputs-"+trained_model_name,
+        output_dir="./train_mistral"+"/outputs-"+trained_model_name,
     ),
 )
-trainer.train()
-model.save_pretrained("fff-mistral-"+trained_model_name)
+trainer.train(resume_from_checkpoint=True)
+e = trainer.evaluate()
+print(e)
+# model.save_pretrained("fff-mistral-"+trained_model_name)

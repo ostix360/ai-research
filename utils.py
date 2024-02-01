@@ -1,6 +1,7 @@
 from typing import Tuple, Optional, Union, List
 
 import torch
+from transformers import StoppingCriteria
 from transformers.modeling_attn_mask_utils import AttentionMaskConverter
 
 
@@ -56,3 +57,13 @@ def _prepare_4d_causal_attention_mask(
 
     return attention_mask
 
+class TokenStoppingCriteria(StoppingCriteria):
+    def __init__(self, stop_token_ids):
+        self.stop_token_id = stop_token_ids
+
+    def __call__(self, inputs, scores):
+        if len(inputs) < len(self.stop_token_id):
+            return False
+        if inputs[-len(self.stop_token_id)] == self.stop_token_id:
+            return True
+        return False

@@ -89,7 +89,9 @@ def plot_all_results_in_one(model_caracs):
 def get_caracs():
     caracs = []
     for file in os.listdir("./"):
-        if file.startswith("outputs-hug-ultra"):
+        if file.startswith("outputs-"):
+            if "hug" in file or "lora" in file or "ultra" in file:
+                continue
             caracs.append(file.title().lower().replace("outputs-", ""))
     return caracs
 
