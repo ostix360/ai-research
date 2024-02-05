@@ -1,0 +1,20 @@
+git+https://github.com/huggingface/transformers.git
+deepspeed
+matplotlib
+flash_attn
+datasets~=2.16.1
+pandas~=2.1.4
+peft~=0.7.1
+bitsandbytes~=0.42.0
+packaging
+xformers
+IPython
+numpy~=1.26.3
+trl~=0.7.9
+setuptools~=68.2.0
+tqdm~=4.66.1
+einops~=0.7.0
+filelock~=3.13.1
+accelerate~=0.26.1
+# "unsloth[cu121_ampere_torch211] @ git+https://github.com/unslothai/unsloth.git"
+# torch==2.1.1
