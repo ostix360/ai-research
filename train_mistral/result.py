@@ -1,15 +1,21 @@
-# This class has to plot the results of all the training runs.
 import glob
 import json
 import os
 import matplotlib.pyplot as plt
 
 
+def insert_newlines(string, every=64):
+    lines = []
+    for i in range(0, len(string), every):
+        lines.append(string[i:i + every])
+    return '\n'.join(lines)
+
+
 def get_model_result(model_carac):
     # Get list of all directories that start with 'checkpoint-'
     model_carac_escaped = model_carac.replace("[", "[[").replace("]", "]]")
     model_carac_escaped = model_carac_escaped.replace("[[", "[[]").replace("]]", "[]]")
-    checkpoint_dirs = glob.glob(f"outputs-{model_carac_escaped}/checkpoint-*/")
+    checkpoint_dirs = glob.glob(f"./outputs-{model_carac_escaped}/checkpoint-*/")
 
     result = None
     for dir in checkpoint_dirs:
@@ -21,6 +27,8 @@ def get_model_result(model_carac):
         except FileNotFoundError:
             continue
     return result
+
+
 def format_result(result):
     final_result = {}
     step_results = []
@@ -38,6 +46,7 @@ def format_result(result):
     final_result["eval_loss"] = eval_loss
     return final_result
 
+
 def plot_result(result, model_carac):
     plt.plot(result["step_results"], result["loss_results"])
     plt.title(f"Loss evolution for {model_carac}")
@@ -45,23 +54,26 @@ def plot_result(result, model_carac):
     plt.ylabel("Loss")
     plt.show()
 
+
 def plot_results(model_caracs):
     for model_carac in model_caracs:
         result = get_model_result(model_carac)
         result = format_result(result)
         plot_result(result, model_carac)
 
-def plot_all_results_in_one(model_caracs):
-    for model_carac in model_caracs:
 
+def plot_all_results_in_one(model_caracs):
+    fig, ax = plt.subplots(figsize=(18, 10))
+    for model_carac in model_caracs:
         result = get_model_result(model_carac)
         result = format_result(result)
         label = model_carac.lstrip('_') if model_carac else None
-        plt.plot(result["step_results"], result["loss_results"], label=label)
-    plt.title(f"Loss evolution for {model_caracs}")
-    plt.xlabel("Epochs")
-    plt.ylabel("Loss")
-    plt.legend()
+        label = insert_newlines(label, 17)
+        ax.plot(result["step_results"], result["loss_results"], label=label)
+    ax.set_title(f"Training Loss evolution exp {exp}")
+    ax.set_xlabel("Epochs")
+    ax.set_ylabel("Loss")
+    ax.legend(bbox_to_anchor=(1.0001, 1), loc='upper left')
     plt.show()
 
     # Plot eval loss on a histogram
@@ -70,34 +82,43 @@ def plot_all_results_in_one(model_caracs):
         result = get_model_result(model_carac)
         result = format_result(result)
         eval_losses.append(result["eval_loss"])
-    plt.bar(model_caracs, eval_losses)
+
+    fig, ax = plt.subplots(figsize=(12, 6))
+    ax.bar(model_caracs, eval_losses)
     # add more space for the labels models_caracs
     plt.subplots_adjust(bottom=0.3)
-    plt.xticks(rotation=45)
+    plt.xticks(rotation=55)
+    labels = [insert_newlines(label, 25) for label in model_caracs]
+    ax.set_xticklabels(labels)
 
     min_loss = min(eval_losses)
     max_loss = max(eval_losses)
-    plt.ylim([min_loss - 0.1 * (max_loss - min_loss), max_loss + 0.1 * (max_loss - min_loss)])
+    ax.set_ylim([min_loss - 0.1 * (max_loss - min_loss), max_loss + 0.1 * (max_loss - min_loss)])
 
-    plt.title(f"Eval losses")
-    plt.xlabel("Models")
-    plt.ylabel("Loss")
-    plt.legend()
+    ax.set_title(f"Eval losses Exp {exp}")
+    ax.set_xlabel("Models")
+    ax.set_ylabel("Loss")
+    ax.legend()
     plt.show()
+
+
+exp = "4"
 
 
 def get_caracs():
     caracs = []
     for file in os.listdir("./"):
         if file.startswith("outputs-"):
-            if "hug" in file or "lora" in file or "ultra" in file:
+            if "hug" not in file or "lora" not in file or "ultra" not in file or "lora2" in file:
                 continue
             caracs.append(file.title().lower().replace("outputs-", ""))
     return caracs
 
+
 def plot_all_results():
     caracs = get_caracs()
     plot_results(caracs)
+
 
 if __name__ == "__main__":
     caracs = get_caracs()

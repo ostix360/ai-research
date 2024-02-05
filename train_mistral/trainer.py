@@ -4,9 +4,10 @@ from datasets import load_dataset, concatenate_datasets, Dataset
 from transformers import TrainingArguments
 from trl import SFTTrainer
 from unsloth import FastMistralModel
-import fff_mistral_patch
+# import fff_mistral_patch
 
-fff_mistral_patch.patch_to_unsloth_mistral()
+
+# fff_mistral_patch.patch_to_unsloth_mistral()
 
 
 model_name = "unsloth/mistral-7b-bnb-4bit"
@@ -14,17 +15,17 @@ max_seq_length = 2048
 dtype = None
 load_in_4bit = True
 
-t_code_dataset = load_dataset("ise-uiuc/Magicoder-OSS-Instruct-75K", split="train[:100]")
-e_code_dataset = load_dataset("ise-uiuc/Magicoder-OSS-Instruct-75K", split="train[-1:]")
+t_code_dataset = load_dataset("ise-uiuc/Magicoder-OSS-Instruct-75K", split="train[:10000]")
+e_code_dataset = load_dataset("ise-uiuc/Magicoder-OSS-Instruct-75K", split="train[-100:]")
 
-t_metamath_dataset = load_dataset("meta-math/MetaMathQA", split="train[:100]")
-e_metamath_dataset = load_dataset("meta-math/MetaMathQA", split="train[-1:]")
+t_metamath_dataset = load_dataset("meta-math/MetaMathQA", split="train[:10000]")
+e_metamath_dataset = load_dataset("meta-math/MetaMathQA", split="train[-100:]")
 
 # t_code2_dataset = load_dataset("ise-uiuc/Magicoder-Evol-Instruct-110K", split="train[:370]")
 # e_code2_dataset = load_dataset("ise-uiuc/Magicoder-Evol-Instruct-110K", split="train[-20:]")
 
-t_ultra_chat_dataset = load_dataset("HuggingFaceH4/ultrachat_200k", split="train_sft[:250]")
-e_ultra_chat_dataset = load_dataset("HuggingFaceH4/ultrachat_200k", split="test_sft[:5]")
+t_ultra_chat_dataset = load_dataset("HuggingFaceH4/ultrachat_200k", split="train_sft[:25000]")
+e_ultra_chat_dataset = load_dataset("HuggingFaceH4/ultrachat_200k", split="test_sft[-200:]")
 
 t_self_reasoning_dataset = load_dataset("freecs/ArtificialThinkerSet")
 e_self_reasoning_dataset = load_dataset("freecs/ArtificialThinkerSet")
@@ -110,11 +111,11 @@ def add_ds(t_ds, e_ds):
     e_list.append(e_ds)
 
 
-# add_ds(t_code_formated_datasets, e_code_formated_datasets)
+add_ds(t_code_formated_datasets, e_code_formated_datasets)
 # add_ds(t_code2_formated_datasets, e_code2_formated_datasets)
 add_ds(t_ultra_chat_formated_datasets, e_ultra_chat_formated_datasets)
-# for i in range(6):
-#     add_ds(t_self_reasoning_formated_datasets["train"], e_self_reasoning_formated_datasets["train"])
+for i in range(6):
+    add_ds(t_self_reasoning_formated_datasets["train"], e_self_reasoning_formated_datasets["train"])
 
 formated_datasets = concatenate_datasets(t_list).shuffle(seed=12)
 e_formated_datasets = concatenate_datasets(e_list).shuffle(seed=12)
@@ -124,35 +125,35 @@ num_fff_layers = 6
 activation_func = "gelu_new"
 module = "up_proj"
 
+    # replace the following line with the one below to use fff adapter
+    # don't forget to patch by uncommenting :
+# fff_mistral_patch.patch_to_unsloth_mistral()
 
+    # model,
     # target_modules=[module,],
     # intermediate_size=intermediate_size,
     # num_fff=num_fff_layers,
     # activation_func=activation_func,
     # use_gradient_checkpointing=True,    # When set to true VRAM grow during training (why?)
+    # random_state=12,
+    # max_seq_length=max_seq_length,
 
 model = FastMistralModel.get_peft_model(
     model,
-    target_modules=[
-        f"layers.13.mlp.{module}",
-        f"layers.14.mlp.{module}",
-        f"layers.15.mlp.{module}",
-        f"layers.16.mlp.{module}",
-        f"layers.17.mlp.{module}",
-        f"layers.18.mlp.{module}",
-        f"layers.19.mlp.{module}",
-    ],
-    intermediate_size=intermediate_size,
-    num_fff=num_fff_layers,
-    activation_func=activation_func,
+    r=46,
+    target_modules=["q_proj", "k_proj", "v_proj", "o_proj", # attention
+                    "gate_proj", "up_proj", "down_proj", ], # FFN
+    lora_alpha=23,
+    lora_dropout=0,
+    bias="none",
     use_gradient_checkpointing=True,
     random_state=12,
     max_seq_length=max_seq_length,
 )
 model.print_trainable_parameters()
 
-trained_model_name = f"hug-ultra-lora-{intermediate_size}-{num_fff_layers}-{activation_func}-{module}"
-# trained_model_name = f"lora-36-18-all"
+# trained_model_name = f"hug-ultra-lora-{intermediate_size}-{num_fff_layers}-{activation_func}-{module}"
+trained_model_name = f"lora-46-23-all"
 
 batch_size = 3
 steps = len(formated_datasets["text"])
@@ -176,7 +177,6 @@ trainer = SFTTrainer(
         warmup_steps=1,
         num_train_epochs=1,
         report_to=["none"],
-        max_steps=1,
         evaluation_strategy="steps",
         eval_steps=steps//batch_size,
         learning_rate=5e-5,
@@ -186,7 +186,7 @@ trainer = SFTTrainer(
         fp16_full_eval=not torch.cuda.is_bf16_supported(),
         logging_steps=50//batch_size,
         optim="adamw_8bit",
-        # max_steps=steps//batch_size,
+        max_steps=steps//batch_size,
         save_total_limit=1,
         save_strategy="steps",
         save_steps=steps//batch_size,
@@ -196,7 +196,7 @@ trainer = SFTTrainer(
         output_dir="./train_mistral"+"/outputs-"+trained_model_name,
     ),
 )
-trainer.train(resume_from_checkpoint=True)
+trainer.train()
 e = trainer.evaluate()
 print(e)
-# model.save_pretrained("fff-mistral-"+trained_model_name)
+model.save_pretrained("fff-mistral-"+trained_model_name)
