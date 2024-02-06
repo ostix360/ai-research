@@ -17,9 +17,12 @@ pip install -r requirements.txt
 
 and install manually the following libraries:
 
+choose the right cuda and torch version for [unsloth](https://github.com/unslothai/unsloth/) (see the repo for more information)
+
+
 ```bash
-pip install torch==2.1.1 triton --upgrade --index-url https://download.pytorch.org/whl/cu121 --force-reinstall
-pip install "unsloth[cu121_ampere_torch211] @ git+https://github.com/unslothai/unsloth.git@35f2ab4a8b4deecbbbe9fbd95f4efde8694233db"
+pip install torch==2.2.0 triton --upgrade --index-url https://download.pytorch.org/whl/cu121 --force-reinstall
+pip install "unsloth[cu121_ampere_torch220] @ git+https://github.com/unslothai/unsloth.git@12b19e31f9f2bd548401d9411ebb4ad840c54acc"
 ```
 
 

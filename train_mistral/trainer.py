@@ -4,10 +4,8 @@ from datasets import load_dataset, concatenate_datasets, Dataset
 from transformers import TrainingArguments
 from trl import SFTTrainer
 from unsloth import FastMistralModel
-# import fff_mistral_patch
+import fff_mistral_patch
 
-
-# fff_mistral_patch.patch_to_unsloth_mistral()
 
 
 model_name = "unsloth/mistral-7b-bnb-4bit"

@@ -14,7 +14,6 @@ trl~=0.7.9
 setuptools~=68.2.0
 tqdm~=4.66.1
 einops~=0.7.0
-filelock~=3.13.1
 accelerate~=0.26.1
-# "unsloth[cu121_ampere_torch211] @ git+https://github.com/unslothai/unsloth.git"
-# torch==2.1.1
+# "unsloth[cu121_ampere_torch220] @ git+https://github.com/unslothai/unsloth.git"
+# torch==2.2.0
