@@ -8,6 +8,9 @@ To reproduce the research, you will need Python and pip installed on your machin
 
 You will need to install the libraries that are in the requirements.txt file (root of the project). You can do this by running the following command in your terminal:
 
+It's highly recommended to use a virtual environment to avoid conflicts with other projects.
+This research use patch to fix some bugs in the libraries. (The patch is automatic)
+
 ```bash
 pip install -r requirements.txt
 ```
@@ -15,11 +18,10 @@ pip install -r requirements.txt
 and install manually the following libraries:
 
 ```bash
-pip install torch --index-url https://download.pytorch.org/whl/cu121/torch_stable.html --force-reinstall
-pip install "unsloth[cu121_ampere_torch211] @ git+https://github.com/unslothai/unsloth.git"
+pip install torch==2.1.1 triton --upgrade --index-url https://download.pytorch.org/whl/cu121 --force-reinstall
+pip install "unsloth[cu121_ampere_torch211] @ git+https://github.com/unslothai/unsloth.git@35f2ab4a8b4deecbbbe9fbd95f4efde8694233db"
 ```
 
-// TODO: Update patch for unsloth and peft for newer version with hot fixes
 
 ## Goal
 
@@ -197,6 +199,7 @@ The following table shows the validation loss of the finetuning for the differen
 
 Both of the adapters have very close validation losses.
 
+We can say that the FFF adapter is as good as the Lora adapter.
 
 
 ## Reproducing the research

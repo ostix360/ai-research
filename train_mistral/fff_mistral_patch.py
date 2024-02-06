@@ -753,6 +753,17 @@ def load_adapter(self, model_id: str, adapter_name: str, is_trainable: bool = Fa
         self.eval()
     return load_result
 
+def _is_peft_model(model):
+    from transformers.utils import is_peft_available
+    from peft import PeftModel
+    from peft import PeftMixedModel
+    return is_peft_available() and (isinstance(model, PeftModel) or isinstance(model, PeftMixedModel))
+
+def get_base_model(self) -> torch.nn.Module:
+        """
+        Returns the base model.
+        """
+        return self.base_model.model
 
 def patch_to_unsloth_mistral():
     from unsloth.models import llama
@@ -776,9 +787,11 @@ def patch_to_unsloth_mistral():
     mixed.model.MixedModel._create_new_module = _create_new_module
     peft.PeftMixedModel.save_pretrained = save_pretrained
     peft.peft_model.PeftModel.load_adapter = load_adapter
+    setattr(peft.PeftMixedModel, "get_base_model", get_base_model)
 
-    # fix remove colom
+    # fix transformers
     from transformers import Trainer
     import transformers
-    Trainer._set_signature_columns_if_needed = _set_signature_columns_if_needed
+    # Trainer._set_signature_columns_if_needed = _set_signature_columns_if_needed
     transformers.trainer.can_return_loss = can_return_loss
+    transformers.trainer._is_peft_model = _is_peft_model
