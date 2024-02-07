@@ -221,5 +221,9 @@ I will be happy to review your pull request and merge it if it is relevant.
 
 Under GNU General Public License v3.0
 
+## Credits
+
+Big thanks to unsloth and their optimizer that make this research possible.
+
 
 
