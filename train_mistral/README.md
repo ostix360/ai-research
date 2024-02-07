@@ -223,7 +223,7 @@ Under GNU General Public License v3.0
 
 ## Credits
 
-Big thanks to unsloth and their optimizer that make this research possible.
+Big thanks to unsloth and their optimized library that make this research possible.
 
 
 
