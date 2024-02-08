@@ -156,8 +156,15 @@ Here it seems like the lora adapter is better than the fff adapter. But the data
 
 #### Conclusion
 
-The best hyperparameters for the FFF network are:
+It's very hard to conclude on the better hyperparameters.
 
+We'll use the following hyperparmeter for the finetuning:
+
+- number of MLP layers in the FFF network: 6
+- number of neurons in each layer (intermediate size): 128
+- activation function: gelu_new
+- injection point (up_proj or gate_proj): up_proj
+- specific layers where FFF network are injected: from the layer 13 to 19
 
 
 ### Step 2
